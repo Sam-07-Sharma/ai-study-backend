@@ -21,7 +21,7 @@ load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 # --- CORRECTED MODEL NAME ---
 # Using the stable and recommended gemini-1.5-flash-latest model
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={API_KEY}"
 
 app = Flask(__name__)
 
