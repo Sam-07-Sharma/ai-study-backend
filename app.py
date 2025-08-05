@@ -11,16 +11,22 @@ import json
 import uuid 
 from PIL import Image
 
-# Load environment variables from .env file
+# This line is for local testing. On Render, it does nothing, which is fine.
 load_dotenv()
 
 # --- Configuration ---
+# This is the correct way to get the API key. 
+# On your laptop, it reads from the .env file.
+# On Render, it reads from the Environment Variables you set up.
 API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={API_KEY}"
+# --- CORRECTED MODEL NAME ---
+# Using the stable and recommended gemini-1.5-flash-latest model
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={API_KEY}"
 
 app = Flask(__name__)
 
-# In-memory cache to store content for different sessions
+# In-memory cache to store content for different sessions.
+# Note: On Render's free plan, this cache will clear if the app is inactive for 15 minutes.
 document_cache = {}
 
 # Configure logging
@@ -162,5 +168,7 @@ def ai_query():
     return jsonify({"response": ai_response})
 
 # --- Run the App ---
+# This block is only used when you run `python app.py` on your laptop.
+# The Gunicorn server on Render ignores this, which is the correct behavior.
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
