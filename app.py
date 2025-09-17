@@ -8,35 +8,35 @@ import io
 import logging
 import sys
 import json
-import uuid 
+import uuid
 from PIL import Image
+import base64
 
-# This line is for local testing. On Render, it does nothing, which is fine.
+# This line is for local testing. On Render, it does nothing.
 load_dotenv()
 
 # --- Configuration ---
-# This is the correct way to get the API key. 
-# On your laptop, it reads from the .env file.
-# On Render, it reads from the Environment Variables you set up.
 API_KEY = os.getenv("GEMINI_API_KEY")
-# Using the stable and recommended gemini-1.5-flash-latest model
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={API_KEY}"
+# --- UPDATED --- Using the more powerful gemini-1.5-pro model for better reasoning.
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro-latest:generateContent?key={API_KEY}"
 
 app = Flask(__name__)
 
-# In-memory cache to store content for different sessions.
+# --- IMPORTANT NOTE ON CACHE ---
+# This in-memory cache works for testing, but it is VOLATILE.
+# If your Render service restarts or scales, this data will be lost.
+# For a production app, consider using a persistent cache like Redis.
 document_cache = {}
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+
 # --- Helper Functions for Text Extraction ---
 def extract_text_from_pdf(pdf_file_bytes):
-    """Extracts text from a PDF using the more robust PyMuPDF library."""
     text = ""
     try:
-        # Open the PDF from the byte stream
         with fitz.open(stream=pdf_file_bytes, filetype="pdf") as doc:
             for page in doc:
                 text += page.get_text()
@@ -56,52 +56,68 @@ def extract_text_from_pptx(pptx_file_stream):
         return None
 
 # --- Helper Functions for AI Processing ---
-def get_ai_response(prompt, document_text=None, image_bytes=None, mime_type=None):
-    """Handles all communication with the Gemini API."""
+# --- UPDATED --- This function now accepts a 'history' parameter for conversation memory.
+def get_ai_response(prompt, history=None, document_text=None, image_bytes=None, mime_type=None):
+    """Handles all communication with the Gemini API, including conversation history."""
     try:
-        parts = []
+        contents = []
         
+        # --- UPDATED --- Build the conversation history for the API
+        if history:
+            for message in history:
+                # The role for Gemini must be 'user' or 'model'
+                role = "user" if message.get("role") == "user" else "model"
+                contents.append({"role": role, "parts": [{"text": message.get("text")}]})
+
+        # The final user prompt is always the last part of the contents
+        final_parts = []
         if document_text:
             context_prompt = (
-                "You are an AI study assistant. Use the provided document context to answer the user's query. "
-                "You can summarize, analyze, and generate new content like questions based on the information within the document.\n\n"
+                "You are an AI study assistant. Use the provided document context to answer the user's query.\n\n"
                 f"--- DOCUMENT CONTEXT ---\n{document_text}\n\n"
                 f"--- USER QUERY ---\n{prompt}"
             )
-            parts.append({"text": context_prompt})
+            final_parts.append({"text": context_prompt})
         elif image_bytes:
             context_prompt = (
                 "You are an AI study assistant. Analyze the following image and answer the user's query about it.\n\n"
                 f"--- USER QUERY ---\n{prompt}"
             )
-            import base64
             encoded_image = base64.b64encode(image_bytes).decode('utf-8')
-            parts.append({"text": context_prompt})
-            parts.append({"inline_data": {"mime_type": mime_type, "data": encoded_image}})
+            final_parts.append({"text": context_prompt})
+            final_parts.append({"inline_data": {"mime_type": mime_type, "data": encoded_image}})
         else:
-            parts.append({"text": prompt})
+            final_parts.append({"text": prompt})
+        
+        # Add the final prompt as a 'user' turn
+        contents.append({"role": "user", "parts": final_parts})
 
-        payload = {"contents": [{"parts": parts}]}
+        payload = {"contents": contents}
         headers = {"Content-Type": "application/json"}
         
         response = requests.post(GEMINI_API_URL, headers=headers, json=payload)
         response.raise_for_status()
         
         result_json = response.json()
-        if 'candidates' in result_json and result_json['candidates']:
-            return result_json['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return "The AI could not generate a response due to safety settings."
+        
+        # Check for safety ratings and blocked responses
+        if not result_json.get('candidates'):
+            return "The AI could not generate a response, possibly due to safety settings or content restrictions."
+        
+        return result_json['candidates'][0]['content']['parts'][0]['text']
 
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"HTTP error occurred: {http_err} - {response.text}")
+        return f"Sorry, an error occurred with the AI service (HTTP {response.status_code})."
     except Exception as e:
         logger.error(f"AI generation error: {e}")
         return "Sorry, an error occurred while communicating with the AI."
 
-# --- API Endpoints ---
 
+# --- API Endpoints ---
 @app.route('/ai-query', methods=['POST'])
 def ai_query():
-    """A single endpoint to handle file uploads and queries."""
+    """A single endpoint to handle file uploads and text/history queries."""
     
     if 'file' in request.files:
         file = request.files['file']
@@ -115,10 +131,11 @@ def ai_query():
         if file_extension in image_extensions:
             try:
                 Image.open(io.BytesIO(file_bytes))
-                mime_type = f'image/{file_extension[1:]}'
+                mime_type = f'image/{file_extension[1:]}' if file_extension.startswith('.') else f'image/{file_extension}'
                 document_cache[session_id] = {'type': 'image', 'content': file_bytes, 'mime_type': mime_type}
                 return jsonify({"session_id": session_id, "message": "Image processed. You can now ask questions about it."})
             except Exception as e:
+                logger.error(f"Image validation error: {e}")
                 return jsonify({"error": "Uploaded file is not a valid image."}), 400
 
         text = None
@@ -134,8 +151,12 @@ def ai_query():
         return jsonify({"session_id": session_id, "message": "File processed. You can now ask questions about it."})
 
     data = request.get_json()
+    if not data:
+        return jsonify({"error": "Invalid JSON payload."}), 400
+        
     query = data.get('query')
     session_id = data.get('session_id')
+    history = data.get('history') # --- UPDATED --- Get history from the request
 
     if not query:
         return jsonify({"error": "Query is required."}), 400
@@ -150,17 +171,15 @@ def ai_query():
         content = cached_data.get('content')
 
         if content_type == 'text':
-            ai_response = get_ai_response(query, document_text=content)
+            ai_response = get_ai_response(query, history=history, document_text=content)
         elif content_type == 'image':
             mime_type = cached_data.get('mime_type')
-            ai_response = get_ai_response(query, image_bytes=content, mime_type=mime_type)
+            ai_response = get_ai_response(query, history=history, image_bytes=content, mime_type=mime_type)
     else:
-        ai_response = get_ai_response(query)
+        ai_response = get_ai_response(query, history=history) # --- UPDATED --- Pass history
     
     return jsonify({"response": ai_response})
 
 # --- Run the App ---
-# This block is only used when you run `python app.py` on your laptop.
-# The Gunicorn server on Render ignores this, which is the correct behavior.
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
